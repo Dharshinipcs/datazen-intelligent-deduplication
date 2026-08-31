@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+pandas
+pyarrow
+python-multipart
+openpyxl
+orjson
