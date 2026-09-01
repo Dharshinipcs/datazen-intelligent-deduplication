@@ -59,3 +59,21 @@ class DatasetSchema(BaseModel):
 
     dataset_id: str
     fields: list[SemanticField]
+
+class StandardizedField(BaseModel):
+    """Standardization result for a single dataset column."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    column_name: str
+    semantic_type: str
+    transformations: list[str]
+
+
+class DatasetStandardizationPlan(BaseModel):
+    """Standardization plan derived from semantic field detection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    fields: list[StandardizedField]

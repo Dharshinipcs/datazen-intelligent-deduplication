@@ -4,6 +4,7 @@ from app.config import APP_VERSION
 from app.routers.profiling import router as profiling_router
 from app.routers.upload import router as upload_router
 from app.services.storage import initialize_storage
+from app.routers.standardization import router as standardization_router
 
 
 app = FastAPI(
@@ -33,3 +34,4 @@ def health_check():
 
 app.include_router(upload_router)
 app.include_router(profiling_router)
+app.include_router(standardization_router)

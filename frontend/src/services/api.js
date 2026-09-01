@@ -58,3 +58,17 @@ export async function detectSchema(datasetId) {
   return parseResponse(response, "Schema detection failed.");
 }
 
+export async function standardizeDataset(datasetId) {
+  const response = await fetch(
+    `${API_BASE_URL}/api/datasets/${datasetId}/standardize`,
+    {
+      method: "POST",
+    }
+  );
+
+  return parseResponse(
+    response,
+    "Dataset standardization failed."
+  );
+}
+
