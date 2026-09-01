@@ -1,0 +1,21 @@
+id,name,email,city,entity_type
+1,Alice Johnson,alice.johnson@example.com,Chennai,Customer
+2,Bob Smith,bob.smith@example.com,Madurai,Customer
+3,Alice Johnson,alice.johnson@example.com,Chennai,Customer
+4,Charlie Brown,charlie.brown@example.com,Coimbatore,Customer
+5,Alicia Johnson,alice.johnson@example.com,Chennai,Customer
+6,David Kumar,david.kumar@example.com,Bengaluru,Customer
+7,Bob Smith,bob.smith@example.com,Madurai,Customer
+8,Emily Davis,emily.davis@example.com,Chennai,Customer
+9,Charlie Brown,charlie.brown@example.com,Coimbatore,Customer
+10,Frank Wilson,frank.wilson@example.com,Hyderabad,Customer
+11,David Kumar,david.kumar@example.com,Bengaluru,Customer
+12,Grace Lee,grace.lee@example.com,Chennai,Customer
+13,A. Johnson,alice.johnson@example.com,Chennai,Customer
+14,Henry Thomas,henry.thomas@example.com,Madurai,Customer
+15,Emily Davis,emily.davis@example.com,Chennai,Customer
+16,Ivy Martin,ivy.martin@example.com,Coimbatore,Customer
+17,Frank Wilson,frank.wilson@example.com,Hyderabad,Customer
+18,Jack Williams,jack.williams@example.com,Bengaluru,Customer
+19,Grace Lee,grace.lee@example.com,Chennai,Customer
+20,Henry Thomas,henry.thomas@example.com,Madurai,Customer

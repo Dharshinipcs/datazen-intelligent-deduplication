@@ -2,14 +2,8 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.config import RAW_DATA_DIR
 from app.models.schemas import DatasetStandardizationPlan
+from app.services.dataset_preparation import prepare_dataset
 from app.services.metadata import load_metadata
-from app.services.profiling import load_dataset
-from app.services.schema_detection import detect_schema
-from app.services.profiling import profile_dataset
-from app.services.standardization import (
-    apply_standardization,
-    build_standardization_plan,
-)
 
 
 router = APIRouter(
@@ -23,8 +17,7 @@ router = APIRouter(
 )
 def standardize_uploaded_dataset(dataset_id: str):
     """
-    Build and apply a semantic-driven standardization plan
-    to a copy of the uploaded dataset.
+    Prepare and standardize an uploaded dataset.
 
     The original raw dataset is never modified.
     """
@@ -45,37 +38,10 @@ def standardize_uploaded_dataset(dataset_id: str):
         )
 
     try:
-        # Load the original dataset.
-        df = load_dataset(
+        standardized_df, schema, plan = prepare_dataset(
             file_path=file_path,
             file_extension=metadata.file_extension,
-        )
-
-        # Detect semantic meaning from the dataset profile.
-        profile = profile_dataset(
-            file_path=file_path,
-            file_extension=metadata.file_extension,
-        )
-
-        fields = detect_schema(profile)
-
-        from app.models.schemas import DatasetSchema
-
-        schema = DatasetSchema(
             dataset_id=dataset_id,
-            fields=fields,
-        )
-
-        # Build the standardization plan.
-        plan = build_standardization_plan(
-            dataset_id=dataset_id,
-            schema=schema,
-        )
-
-        # Apply transformations to a copy.
-        standardized_df = apply_standardization(
-            df=df,
-            plan=plan,
         )
 
         return {

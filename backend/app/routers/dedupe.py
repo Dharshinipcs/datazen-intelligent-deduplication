@@ -1,0 +1,451 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, status
+
+from app.config import RAW_DATA_DIR
+from app.models.schemas import (
+    DedupeLabelRequest,
+    DedupeLabelResponse,
+    DedupePair,
+    DedupePrepareRequest,
+    DedupePrepareResponse,
+    DedupeRecord,
+    DedupeTrainRequest,
+    DedupeTrainResponse,
+    DedupeLearnedPatternsResponse,
+    LearnedDedupePatternResponse,
+    SplinkBlockingRuleResponse,
+    SplinkBlockingStrategyResponse,
+    DedupeUncertainPairsResponse,
+)
+from app.services.blocking import (
+    generate_splink_blocking_rules,
+)
+from app.services.dataset_preparation import prepare_dataset
+from app.services.dedupe_active_learning import (
+    create_active_learning_session,
+    get_learned_dedupe_patterns,
+    get_uncertain_pairs,
+    mark_labeled_pairs,
+    train_dedupe_model,
+)
+from app.services.dedupe_engine import (
+    build_dedupe_fields,
+    create_dedupe_linker,
+    dataframe_to_dedupe_records,
+)
+from app.services.dedupe_session import dedupe_sessions
+from app.services.metadata import load_metadata
+
+
+router = APIRouter(
+    prefix="/api/datasets",
+    tags=["dedupe"],
+)
+
+
+def _load_dataset_metadata(dataset_id: str):
+    """Load dataset metadata and verify the raw file exists."""
+
+    try:
+        metadata = load_metadata(dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset not found.",
+        ) from exc
+
+    file_path = RAW_DATA_DIR / metadata.stored_filename
+
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Stored dataset file not found.",
+        )
+
+    return metadata, file_path
+
+
+def _get_session(dataset_id: str):
+    """Get an active Dedupe session."""
+
+    try:
+        return dedupe_sessions.get(dataset_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No active Dedupe session exists for this dataset. "
+                "Prepare the dataset first."
+            ),
+        ) from exc
+
+
+def _pair_to_api_pair(
+    pair: tuple[dict[str, str], dict[str, str]],
+) -> DedupePair:
+    """Convert a Dedupe pair into the API representation."""
+
+    record_a, record_b = pair
+
+    return DedupePair(
+        record_a=DedupeRecord(
+            record_id=_extract_record_id(record_a),
+            data=record_a,
+        ),
+        record_b=DedupeRecord(
+            record_id=_extract_record_id(record_b),
+            data=record_b,
+        ),
+    )
+
+
+def _extract_record_id(
+    record: dict[str, str],
+) -> int:
+    """Extract the original integer record identifier."""
+
+    value = record.get("_dedupe_record_id")
+
+    if value is not None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+
+    value = record.get("id")
+
+    if value is not None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+
+    return -1
+
+
+def _api_pair_to_tuple(
+    pair: DedupePair,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Convert an API pair back into Dedupe's representation."""
+
+    return pair.record_a.data, pair.record_b.data
+
+
+@router.post(
+    "/{dataset_id}/dedupe/prepare",
+    response_model=DedupePrepareResponse,
+)
+def prepare_dedupe(
+    dataset_id: str,
+    request: DedupePrepareRequest,
+):
+    """
+    Prepare a dataset for Dedupe active learning.
+    """
+
+    metadata, file_path = _load_dataset_metadata(dataset_id)
+
+    try:
+        standardized_df, schema, _plan = prepare_dataset(
+            file_path=file_path,
+            file_extension=metadata.file_extension,
+            dataset_id=dataset_id,
+        )
+
+        dedupe_fields = build_dedupe_fields(schema)
+
+        if not dedupe_fields:
+            raise ValueError(
+                "No fields are available for Dedupe matching."
+            )
+
+        records = dataframe_to_dedupe_records(
+            standardized_df,
+            dedupe_fields,
+        )
+
+        if len(records) < 2:
+            raise ValueError(
+                "At least two records are required for deduplication."
+            )
+
+        linker = create_dedupe_linker(dedupe_fields)
+
+        session = create_active_learning_session(
+            dataset_id=dataset_id,
+            linker=linker,
+            records=records,
+            sample_size=request.sample_size,
+            blocked_proportion=request.blocked_proportion,
+        )
+
+        dedupe_sessions.save(
+            dataset_id=dataset_id,
+            session=session,
+        )
+
+        return DedupePrepareResponse(
+            dataset_id=dataset_id,
+            row_count=len(standardized_df),
+            column_count=len(standardized_df.columns),
+            fields=[
+                field.column_name
+                for field in schema.fields
+            ],
+            sample_size=request.sample_size,
+            blocked_proportion=request.blocked_proportion,
+            status="active_learning_ready",
+        )
+
+    except (ValueError, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Unable to prepare dataset for Dedupe: {exc}"
+            ),
+        ) from exc
+
+
+@router.get(
+    "/{dataset_id}/dedupe/uncertain-pairs",
+    response_model=DedupeUncertainPairsResponse,
+)
+def get_dedupe_uncertain_pairs(
+    dataset_id: str,
+    limit: int = 10,
+):
+    """Return the most informative pairs selected by Dedupe."""
+
+    if limit <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="limit must be greater than zero.",
+        )
+
+    session = _get_session(dataset_id)
+
+    try:
+        pairs = get_uncertain_pairs(
+            session=session,
+            limit=limit,
+        )
+
+        return DedupeUncertainPairsResponse(
+            dataset_id=dataset_id,
+            pairs=[
+                _pair_to_api_pair(pair)
+                for pair in pairs
+            ],
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/{dataset_id}/dedupe/label",
+    response_model=DedupeLabelResponse,
+)
+def label_dedupe_pairs(
+    dataset_id: str,
+    request: DedupeLabelRequest,
+):
+    """Add Match/Distinct labels to the active-learning session."""
+
+    session = _get_session(dataset_id)
+
+    matches = [
+        _api_pair_to_tuple(pair)
+        for pair in request.matches
+    ]
+
+    distinct = [
+        _api_pair_to_tuple(pair)
+        for pair in request.distinct
+    ]
+
+    if not matches and not distinct:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "At least one Match or Distinct pair is required."
+            ),
+        )
+
+    try:
+        mark_labeled_pairs(
+            session=session,
+            matches=matches,
+            distinct=distinct,
+        )
+
+        return DedupeLabelResponse(
+            dataset_id=dataset_id,
+            matches_added=len(matches),
+            distinct_added=len(distinct),
+            status="labels_added",
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/{dataset_id}/dedupe/train",
+    response_model=DedupeTrainResponse,
+)
+def train_dedupe(
+    dataset_id: str,
+    request: DedupeTrainRequest,
+):
+    """
+    Train Dedupe and expose its learned patterns.
+
+    Important:
+        The learned patterns are NOT treated as final blocking rules.
+        They are passed to the application's blocking strategy
+        generator in the next stage.
+    """
+
+    session = _get_session(dataset_id)
+
+    try:
+        train_dedupe_model(
+            session=session,
+            recall=request.recall,
+            index_predicates=request.index_predicates,
+        )
+
+        patterns = get_learned_dedupe_patterns(session)
+
+        return DedupeTrainResponse(
+            dataset_id=dataset_id,
+            status="trained",
+            learned_patterns=[
+                LearnedDedupePatternResponse(
+                    fields=list(pattern.fields),
+                    pattern_type=pattern.strategy,
+                    description=(
+                        f"Dedupe learned a {pattern.strategy} "
+                        f"matching pattern on: {', '.join(pattern.fields)}"
+                    ),
+                )
+                for pattern in patterns
+            ],
+        )
+
+    except (ValueError, AssertionError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Unable to train Dedupe model. "
+                "Add more Match/Distinct labels and retry. "
+                f"Details: {exc}"
+            ),
+        ) from exc
+
+
+@router.get(
+    "/{dataset_id}/dedupe/learned-patterns",
+    response_model=DedupeLearnedPatternsResponse,
+)
+def get_dedupe_learned_patterns(
+    dataset_id: str,
+):
+    """
+    Return patterns learned by Dedupe.
+
+    These are intermediate learning results, not Splink rules.
+    """
+
+    session = _get_session(dataset_id)
+
+    try:
+        patterns = get_learned_dedupe_patterns(session)
+
+        if not patterns:
+            raise ValueError(
+                "No learned Dedupe patterns are available. "
+                "Train the Dedupe model first."
+            )
+
+        return DedupeLearnedPatternsResponse(
+            dataset_id=dataset_id,
+            patterns=[
+                LearnedDedupePatternResponse(
+                    fields=list(pattern.fields),
+                    pattern_type=pattern.strategy,
+                    description=(
+                        f"Dedupe learned a {pattern.strategy} "
+                        f"matching pattern on: {', '.join(pattern.fields)}"
+                    ),
+                )
+                for pattern in patterns
+            ],
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/{dataset_id}/dedupe/blocking-strategy/generate",
+    response_model=SplinkBlockingStrategyResponse,
+)
+def generate_blocking_strategy(
+    dataset_id: str,
+):
+    """
+    Generate the application's final Splink blocking strategy
+    from patterns learned by Dedupe.
+    """
+
+    session = _get_session(dataset_id)
+
+    try:
+        patterns = get_learned_dedupe_patterns(session)
+
+        if not patterns:
+            raise ValueError(
+                "No learned Dedupe patterns are available. "
+                "Train the Dedupe model first."
+            )
+
+        rules = generate_splink_blocking_rules(
+            patterns,
+        )
+
+        if not rules:
+            raise ValueError(
+                "Unable to generate Splink blocking rules from "
+                "the learned Dedupe patterns."
+            )
+
+        return SplinkBlockingStrategyResponse(
+            dataset_id=dataset_id,
+            source="dedupe_pattern_generator",
+            rules=[
+                SplinkBlockingRuleResponse(
+                    fields=list(rule.fields),
+                    strategy=rule.strategy,
+                    sql_condition=rule.sql_condition,
+                )
+                for rule in rules
+            ],
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc

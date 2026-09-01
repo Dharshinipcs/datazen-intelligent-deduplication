@@ -6,3 +6,5 @@ pyarrow
 python-multipart
 openpyxl
 orjson
+dedupe==3.0.3
+BTrees<6.5
