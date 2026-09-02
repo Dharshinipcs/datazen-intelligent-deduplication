@@ -5,6 +5,7 @@ from typing import Any
 
 import dedupe
 
+from app.models.schemas import DatasetSchema
 from app.services.blocking import (
     LearnedDedupePattern,
 )
@@ -15,6 +16,7 @@ class ActiveLearningSession:
     dataset_id: str
     linker: Any
     records: dict[int, dict[str, str]]
+    schema: DatasetSchema
     sample_size: int
     blocked_proportion: float
 
@@ -23,6 +25,7 @@ def create_active_learning_session(
     dataset_id: str,
     linker: Any,
     records: dict[int, dict[str, str]],
+    schema: DatasetSchema,
     sample_size: int = 1500,
     blocked_proportion: float = 0.9,
 ) -> ActiveLearningSession:
@@ -58,6 +61,7 @@ def create_active_learning_session(
         dataset_id=dataset_id,
         linker=linker,
         records=records,
+        schema=schema,
         sample_size=sample_size,
         blocked_proportion=blocked_proportion,
     )

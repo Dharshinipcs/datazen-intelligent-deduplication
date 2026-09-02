@@ -17,7 +17,12 @@ from app.models.schemas import (
     SplinkBlockingRuleResponse,
     SplinkBlockingStrategyResponse,
     DedupeUncertainPairsResponse,
+    CandidateGenerationResponse,
+    CandidatePairResponse,
+    SplinkMatchResponse,
+    SplinkMatchingResponse,
 )
+from app.models.schemas import MatchDecisionItem, MatchDecisionResponse
 from app.services.blocking import (
     generate_splink_blocking_rules,
 )
@@ -36,6 +41,9 @@ from app.services.dedupe_engine import (
 )
 from app.services.dedupe_session import dedupe_sessions
 from app.services.metadata import load_metadata
+from app.services.candidate_generation import generate_candidate_pairs
+from app.services.splink_matching import run_splink_matching
+from app.services.match_decision import classify_match_results
 
 
 router = APIRouter(
@@ -176,6 +184,7 @@ def prepare_dedupe(
             dataset_id=dataset_id,
             linker=linker,
             records=records,
+            schema=schema,
             sample_size=request.sample_size,
             blocked_proportion=request.blocked_proportion,
         )
@@ -449,3 +458,209 @@ def generate_blocking_strategy(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+@router.post(
+    "/{dataset_id}/dedupe/candidates/generate",
+    response_model=CandidateGenerationResponse,
+)
+def generate_candidates(dataset_id: str) -> CandidateGenerationResponse:
+    session = _get_session(dataset_id)
+
+    learned_patterns = get_learned_dedupe_patterns(session)
+
+    try:
+        blocking_rules = generate_splink_blocking_rules(learned_patterns)
+
+        candidate_pairs = generate_candidate_pairs(
+            records=session.records,
+            blocking_rules=blocking_rules,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    candidates = [
+        CandidatePairResponse(
+            record_a_id=record_a_id,
+            record_b_id=record_b_id,
+        )
+        for record_a_id, record_b_id in candidate_pairs
+    ]
+
+    return CandidateGenerationResponse(
+        dataset_id=dataset_id,
+        candidate_pair_count=len(candidates),
+        blocking_rule_count=len(blocking_rules),
+        candidates=candidates,
+        status="generated",
+    )
+
+@router.post(
+    "/{dataset_id}/dedupe/match",
+    response_model=SplinkMatchingResponse,
+)
+def run_matching(dataset_id: str) -> SplinkMatchingResponse:
+    session = _get_session(dataset_id)
+
+    learned_patterns = get_learned_dedupe_patterns(session)
+
+    try:
+        blocking_rules = generate_splink_blocking_rules(learned_patterns)
+
+        prediction_dataframe = run_splink_matching(
+            records=session.records,
+            blocking_rules=blocking_rules,
+            schema=session.schema,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    matches = _prediction_dataframe_to_matches(
+        prediction_dataframe
+    )
+
+    return SplinkMatchingResponse(
+        dataset_id=dataset_id,
+        match_pair_count=len(matches),
+        blocking_rule_count=len(blocking_rules),
+        matches=matches,
+        status="matched",
+    )
+
+
+def _prediction_dataframe_to_matches(
+    prediction_dataframe,
+) -> list[SplinkMatchResponse]:
+    required_columns = {
+        "unique_id_l",
+        "unique_id_r",
+        "match_probability",
+    }
+
+    missing_columns = required_columns - set(prediction_dataframe.columns)
+
+    if missing_columns:
+        raise ValueError(
+            "Splink prediction output is missing expected columns: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    matches: list[SplinkMatchResponse] = []
+
+    for _, row in prediction_dataframe.iterrows():
+        record_a_id = int(row["unique_id_l"])
+        record_b_id = int(row["unique_id_r"])
+        match_probability = float(row["match_probability"])
+
+        if record_a_id == record_b_id:
+            continue
+
+        matches.append(
+            SplinkMatchResponse(
+                record_a_id=min(record_a_id, record_b_id),
+                record_b_id=max(record_a_id, record_b_id),
+                match_probability=match_probability,
+            )
+        )
+
+    matches.sort(
+        key=lambda item: (
+            -item.match_probability,
+            item.record_a_id,
+            item.record_b_id,
+        )
+    )
+
+    return matches
+
+@router.post(
+    "/{dataset_id}/dedupe/decisions",
+    response_model=MatchDecisionResponse,
+)
+def get_match_decisions(dataset_id: str) -> MatchDecisionResponse:
+    session = _get_session(dataset_id)
+
+    learned_patterns = get_learned_dedupe_patterns(session)
+
+    try:
+        blocking_rules = generate_splink_blocking_rules(learned_patterns)
+
+        prediction_dataframe = run_splink_matching(
+            records=session.records,
+            blocking_rules=blocking_rules,
+            schema=session.schema,
+        )
+
+        required_columns = {
+            "unique_id_l",
+            "unique_id_r",
+            "match_probability",
+        }
+
+        missing_columns = required_columns - set(
+            prediction_dataframe.columns
+        )
+
+        if missing_columns:
+            raise ValueError(
+                "Splink prediction output is missing expected columns: "
+                + ", ".join(sorted(missing_columns))
+            )
+
+        raw_results = [
+            (
+                int(row["unique_id_l"]),
+                int(row["unique_id_r"]),
+                float(row["match_probability"]),
+            )
+            for _, row in prediction_dataframe.iterrows()
+        ]
+
+        classified_results = classify_match_results(raw_results)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    results = [
+        MatchDecisionItem(
+            record_a_id=item.record_a_id,
+            record_b_id=item.record_b_id,
+            match_probability=item.match_probability,
+            decision=item.decision.value,
+        )
+        for item in classified_results
+    ]
+
+    match_count = sum(
+        item.decision == "match"
+        for item in results
+    )
+
+    possible_match_count = sum(
+        item.decision == "possible_match"
+        for item in results
+    )
+
+    non_match_count = sum(
+        item.decision == "non_match"
+        for item in results
+    )
+
+    return MatchDecisionResponse(
+        dataset_id=dataset_id,
+        match_count=match_count,
+        possible_match_count=possible_match_count,
+        non_match_count=non_match_count,
+        results=results,
+        status="classified",
+    )
