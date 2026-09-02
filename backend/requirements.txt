@@ -8,3 +8,4 @@ openpyxl
 orjson
 dedupe==3.0.3
 BTrees<6.5
+splink==4.0.16
