@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import "./App.css";
 
 import {
+  buildEntityClusters,
   detectSchema,
   generateBlockingStrategy,
   generateCandidatePairs,
@@ -89,6 +90,15 @@ function App() {
   const [humanReviewMessage, setHumanReviewMessage] =
     useState("");
 
+  /* ---------------- Entity Clustering state ---------------- */
+
+  const [clusteringEntities, setClusteringEntities] =
+    useState(false);
+  const [clusteringResult, setClusteringResult] =
+    useState(null);
+  const [clusteringMessage, setClusteringMessage] =
+    useState("");
+
   const [error, setError] = useState("");
 
   /* ---------------- Processing state ---------------- */
@@ -107,7 +117,8 @@ function App() {
     matchingSplink ||
     classifyingMatches ||
     loadingHumanReview ||
-    submittingHumanReview;
+    submittingHumanReview ||
+    clusteringEntities;
 
   /* ---------------- Helpers ---------------- */
 
@@ -145,6 +156,10 @@ function App() {
 
     setDedupeMessage("");
     setHumanReviewMessage("");
+
+    setClusteringEntities(false);
+    setClusteringResult(null);
+    setClusteringMessage("");
   }
 
   function handleFileChange(event) {
@@ -287,6 +302,9 @@ function App() {
       setDecisionResult(null);
       setHumanReviewResult(null);
       setCurrentReviewItem(null);
+
+      setClusteringResult(null);
+      setClusteringMessage("");
 
       await loadNextPair(datasetId);
     } catch (err) {
@@ -461,15 +479,6 @@ function App() {
 
         setBlockingResult(blockingData);
 
-        /*
-         * Blocking is now complete.
-         * Automatically continue through:
-         *
-         * Candidate generation
-         * -> Splink matching
-         * -> Match decisions
-         * -> Human Review
-         */
         await runPostBlockingPipeline(
           datasetId
         );
@@ -527,12 +536,6 @@ function App() {
         );
       }
 
-      /*
-       * Remove the reviewed pair locally.
-       * The backend has already persisted the decision,
-       * so the UI can immediately advance without
-       * recomputing the expensive Splink prediction.
-       */
       setHumanReviewResult((previous) => {
         if (!previous) {
           return previous;
@@ -564,9 +567,6 @@ function App() {
           : "Review saved as Non-match."
       );
 
-      /*
-       * Advance to the next remaining review item.
-       */
       setHumanReviewResult((previous) => {
         if (!previous) {
           return previous;
@@ -589,6 +589,43 @@ function App() {
     }
   }
 
+  /* ---------------- Entity Clustering workflow ---------------- */
+
+  async function handleEntityClustering() {
+    if (
+      !uploadResult?.dataset_id ||
+      clusteringEntities ||
+      processing
+    ) {
+      return;
+    }
+
+    const datasetId = uploadResult.dataset_id;
+
+    setClusteringEntities(true);
+    setError("");
+    setClusteringMessage("");
+    setClusteringResult(null);
+
+    try {
+      const result =
+        await buildEntityClusters(datasetId);
+
+      setClusteringResult(result);
+
+      setClusteringMessage(
+        "Entity clustering completed successfully."
+      );
+    } catch (err) {
+      setError(
+        err.message ||
+          "Failed to build entity clusters."
+      );
+    } finally {
+      setClusteringEntities(false);
+    }
+  }
+
   const canTrain =
     matchCount >= 3 && distinctCount >= 3;
 
@@ -599,7 +636,7 @@ function App() {
     humanReviewResult?.review_count ?? 0;
 
   const humanReviewComplete =
-    humanReviewResult &&
+    Boolean(humanReviewResult) &&
     reviewCount === 0;
 
   return (
@@ -793,6 +830,21 @@ function App() {
               <span>11</span>
               <strong>Review</strong>
               <small>Human validation</small>
+            </div>
+
+            <div className="pipeline-line" />
+
+            <div
+              className={`pipeline-step ${
+                clusteringResult ||
+                clusteringEntities
+                  ? "active"
+                  : ""
+              }`}
+            >
+              <span>12</span>
+              <strong>Cluster</strong>
+              <small>Group entities</small>
             </div>
           </div>
         </section>
@@ -2211,6 +2263,224 @@ function App() {
                     )}
                   </div>
                 )}
+
+                {/* -------- Entity Clustering -------- */}
+
+                {humanReviewComplete &&
+                  !clusteringResult && (
+                    <div className="entity-clustering-start">
+                      <div className="entity-clustering-start-icon">
+                        12
+                      </div>
+
+                      <div className="entity-clustering-start-content">
+                        <strong>
+                          Build Entity Clusters
+                        </strong>
+
+                        <span>
+                          Group confirmed duplicate records
+                          into unified entities using
+                          automatic matches and
+                          human-reviewed decisions.
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        className="upload-button"
+                        onClick={
+                          handleEntityClustering
+                        }
+                        disabled={processing}
+                      >
+                        {clusteringEntities
+                          ? "Clustering..."
+                          : "Build Entity Clusters"}
+                      </button>
+                    </div>
+                  )}
+
+                {clusteringEntities && (
+                  <div className="message processing">
+                    <strong>
+                      Building entity clusters...
+                    </strong>
+
+                    <span>
+                      Grouping confirmed duplicate records
+                      using transitive entity relationships.
+                    </span>
+                  </div>
+                )}
+
+                {clusteringResult && (
+                  <div className="entity-clustering-section">
+                    <div className="subsection-heading">
+                      <div>
+                        <p className="eyebrow">
+                          ENTITY CLUSTERING COMPLETE
+                        </p>
+
+                        <h4>
+                          Resolved Entity Groups
+                        </h4>
+                      </div>
+
+                      <div className="schema-count">
+                        {clusteringResult.cluster_count}{" "}
+                        {clusteringResult.cluster_count === 1
+                          ? "Entity"
+                          : "Entities"}
+                      </div>
+                    </div>
+
+                    <p className="schema-description">
+                      Confirmed duplicate records have been
+                      grouped into unified entity clusters.
+                      Records connected through matching
+                      relationships are resolved into the
+                      same entity.
+                    </p>
+
+                    <div className="cluster-stat-grid">
+                      <div className="cluster-stat">
+                        <span>
+                          Entity clusters
+                        </span>
+
+                        <strong>
+                          {clusteringResult.cluster_count.toLocaleString()}
+                        </strong>
+
+                        <small>
+                          Resolved duplicate entities
+                        </small>
+                      </div>
+
+                      <div className="cluster-stat">
+                        <span>
+                          Clustered records
+                        </span>
+
+                        <strong>
+                          {clusteringResult.clustered_record_count.toLocaleString()}
+                        </strong>
+
+                        <small>
+                          Records assigned to entities
+                        </small>
+                      </div>
+
+                      <div className="cluster-stat">
+                        <span>
+                          Unclustered records
+                        </span>
+
+                        <strong>
+                          {clusteringResult.unclustered_record_count.toLocaleString()}
+                        </strong>
+
+                        <small>
+                          No confirmed duplicate relationship
+                        </small>
+                      </div>
+                    </div>
+
+                    <div className="cluster-list">
+                      {clusteringResult.clusters.map(
+                        (cluster) => (
+                          <div
+                            className="cluster-card"
+                            key={cluster.cluster_id}
+                          >
+                            <div className="cluster-card-header">
+                              <div className="cluster-identity">
+                                <div className="cluster-number">
+                                  {String(
+                                    cluster.cluster_id
+                                  ).padStart(2, "0")}
+                                </div>
+
+                                <div>
+                                  <strong>
+                                    Entity Cluster{" "}
+                                    {cluster.cluster_id}
+                                  </strong>
+
+                                  <span>
+                                    {
+                                      cluster.record_ids
+                                        .length
+                                    }{" "}
+                                    records
+                                  </span>
+                                </div>
+                              </div>
+
+                              <span className="cluster-badge">
+                                Duplicate entity
+                              </span>
+                            </div>
+
+                            <div className="cluster-records">
+                              {cluster.record_ids.map(
+                                (recordId) => (
+                                  <span
+                                    className="cluster-record"
+                                    key={recordId}
+                                  >
+                                    Record #{recordId}
+                                  </span>
+                                )
+                              )}
+                            </div>
+                          </div>
+                        )
+                      )}
+                    </div>
+
+                    {clusteringMessage && (
+                      <div className="message success">
+                        <strong>
+                          Entity clustering completed.
+                        </strong>
+
+                        <span>
+                          {
+                            clusteringResult.cluster_count
+                          }{" "}
+                          duplicate entities were resolved
+                          from{" "}
+                          {
+                            clusteringResult.clustered_record_count
+                          }{" "}
+                          records.
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="clustering-complete-banner">
+                      <div className="clustering-complete-icon">
+                        ✓
+                      </div>
+
+                      <div>
+                        <strong>
+                          Entity Resolution Complete
+                        </strong>
+
+                        <span>
+                          Duplicate records have been
+                          grouped into entity-level
+                          clusters. The pipeline is now
+                          ready for golden record creation
+                          and survivorship.
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -2221,3 +2491,4 @@ function App() {
 }
 
 export default App;
+

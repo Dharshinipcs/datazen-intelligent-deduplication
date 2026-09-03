@@ -267,3 +267,18 @@ export async function submitHumanReview(
     "Failed to save the Human Review decision."
   );
 }
+/* ---------------- ENTITY CLUSTERING ---------------- */
+
+export async function buildEntityClusters(datasetId) {
+  const response = await fetch(
+    `${API_BASE_URL}/api/datasets/${datasetId}/dedupe/clusters`,
+    {
+      method: "POST",
+    }
+  );
+
+  return parseResponse(
+    response,
+    "Failed to build entity clusters."
+  );
+}

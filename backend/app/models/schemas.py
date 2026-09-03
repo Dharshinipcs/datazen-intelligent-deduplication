@@ -317,3 +317,29 @@ class HumanReviewDecisionResponse(BaseModel):
     record_b_id: int
     decision: str
     status: str
+
+# ---------------------------------------------------------------------------
+# ENTITY CLUSTERING API SCHEMAS
+# ---------------------------------------------------------------------------
+
+
+class EntityClusterResponse(BaseModel):
+    """A single deduplicated entity cluster."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cluster_id: int
+    record_ids: list[int]
+
+
+class EntityClusteringResponse(BaseModel):
+    """Result of grouping matched records into entity clusters."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    cluster_count: int
+    clustered_record_count: int
+    unclustered_record_count: int
+    clusters: list[EntityClusterResponse]
+    status: str

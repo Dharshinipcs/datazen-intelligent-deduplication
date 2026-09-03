@@ -25,6 +25,8 @@ from app.models.schemas import (
     HumanReviewDecisionResponse,
     HumanReviewItem,
     HumanReviewResponse,
+    EntityClusterResponse,
+    EntityClusteringResponse,
 )
 from app.models.schemas import MatchDecisionItem, MatchDecisionResponse
 from app.services.blocking import (
@@ -49,6 +51,7 @@ from app.services.candidate_generation import generate_candidate_pairs
 from app.services.splink_matching import run_splink_matching
 from app.services.match_decision import classify_match_results
 from app.services.human_review import human_review_store
+from app.services.entity_clustering import build_entity_clusters
 
 
 router = APIRouter(
@@ -820,4 +823,159 @@ def submit_human_review(
         record_b_id=decision.record_b_id,
         decision=decision.decision,
         status="saved",
+    )
+
+@router.post(
+    "/{dataset_id}/dedupe/clusters",
+    response_model=EntityClusteringResponse,
+)
+def cluster_entities(
+    dataset_id: str,
+) -> EntityClusteringResponse:
+    """
+    Group confirmed duplicate records into entity clusters.
+
+    Confirmed matches come from:
+    1. Splink matches with probability >= 0.90.
+    2. Human Review decisions explicitly marked as "match".
+
+    Matching is transitive: if A matches B and B matches C,
+    all three records belong to the same entity cluster.
+    """
+
+    session = _get_session(dataset_id)
+
+    learned_patterns = get_learned_dedupe_patterns(session)
+
+    if not learned_patterns:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "No learned Dedupe patterns are available. "
+                "Train the Dedupe model first."
+            ),
+        )
+
+    try:
+        # Generate the same blocking rules used by the
+        # existing Splink matching pipeline.
+        blocking_rules = generate_splink_blocking_rules(
+            learned_patterns
+        )
+
+        # Run the existing Splink matcher.
+        prediction_dataframe = run_splink_matching(
+            records=session.records,
+            blocking_rules=blocking_rules,
+            schema=session.schema,
+        )
+
+        required_columns = {
+            "unique_id_l",
+            "unique_id_r",
+            "match_probability",
+        }
+
+        missing_columns = required_columns - set(
+            prediction_dataframe.columns
+        )
+
+        if missing_columns:
+            raise ValueError(
+                "Splink prediction output is missing expected columns: "
+                + ", ".join(sorted(missing_columns))
+            )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    # ------------------------------------------------------------------
+    # 1. Add high-confidence automatic Splink matches.
+    # ------------------------------------------------------------------
+
+    match_edges: set[tuple[int, int]] = set()
+
+    for _, row in prediction_dataframe.iterrows():
+        record_a_id = int(row["unique_id_l"])
+        record_b_id = int(row["unique_id_r"])
+        probability = float(row["match_probability"])
+
+        if record_a_id == record_b_id:
+            continue
+
+        if probability < 0.90:
+            continue
+
+        normalized_pair = (
+            min(record_a_id, record_b_id),
+            max(record_a_id, record_b_id),
+        )
+
+        match_edges.add(normalized_pair)
+
+    # ------------------------------------------------------------------
+    # 2. Add Human Review confirmed matches.
+    # ------------------------------------------------------------------
+
+    for decision in human_review_store.get_all(dataset_id):
+        normalized_pair = (
+            min(decision.record_a_id, decision.record_b_id),
+            max(decision.record_a_id, decision.record_b_id),
+        )
+
+        if decision.decision == "match":
+            match_edges.add(normalized_pair)
+
+        elif decision.decision == "non_match":
+            # A human decision must override an automatic match.
+            match_edges.discard(normalized_pair)
+
+    # ------------------------------------------------------------------
+    # 3. Build connected components.
+    # ------------------------------------------------------------------
+
+    record_ids = [
+        int(record_id)
+        for record_id in session.records.keys()
+    ]
+
+    clusters, _unclustered = build_entity_clusters(
+        record_ids=record_ids,
+        match_edges=match_edges,
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Convert clusters to API response objects.
+    # ------------------------------------------------------------------
+
+    cluster_responses = [
+        EntityClusterResponse(
+            cluster_id=index,
+            record_ids=cluster_record_ids,
+        )
+        for index, cluster_record_ids in enumerate(
+            clusters,
+            start=1,
+        )
+    ]
+
+    clustered_record_count = sum(
+        len(cluster.record_ids)
+        for cluster in cluster_responses
+    )
+
+    unclustered_record_count = (
+        len(record_ids) - clustered_record_count
+    )
+
+    return EntityClusteringResponse(
+        dataset_id=dataset_id,
+        cluster_count=len(cluster_responses),
+        clustered_record_count=clustered_record_count,
+        unclustered_record_count=unclustered_record_count,
+        clusters=cluster_responses,
+        status="completed",
     )
