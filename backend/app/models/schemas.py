@@ -283,3 +283,37 @@ class MatchDecisionResponse(BaseModel):
     non_match_count: int
     results: list[MatchDecisionItem]
     status: str
+
+class HumanReviewItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_a: DedupeRecord
+    record_b: DedupeRecord
+    match_probability: float = Field(ge=0.0, le=1.0)
+
+
+class HumanReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    review_count: int
+    items: list[HumanReviewItem]
+    status: str
+
+
+class HumanReviewDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_a_id: int
+    record_b_id: int
+    decision: str
+
+
+class HumanReviewDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    record_a_id: int
+    record_b_id: int
+    decision: str
+    status: str

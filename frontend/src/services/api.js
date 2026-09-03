@@ -109,7 +109,11 @@ export async function getUncertainDedupePair(datasetId) {
   );
 }
 
-export async function labelDedupePair(datasetId, pair, label) {
+export async function labelDedupePair(
+  datasetId,
+  pair,
+  label
+) {
   const payload =
     label === "match"
       ? {
@@ -159,7 +163,9 @@ export async function trainDedupe(datasetId) {
   );
 }
 
-export async function generateBlockingStrategy(datasetId) {
+export async function generateBlockingStrategy(
+  datasetId
+) {
   const response = await fetch(
     `${API_BASE_URL}/api/datasets/${datasetId}/dedupe/blocking-strategy/generate`,
     {
@@ -170,5 +176,94 @@ export async function generateBlockingStrategy(datasetId) {
   return parseResponse(
     response,
     "Failed to generate the blocking strategy."
+  );
+}
+
+/* ---------------- MATCHING PIPELINE ---------------- */
+
+export async function generateCandidatePairs(
+  datasetId
+) {
+  const response = await fetch(
+    `${API_BASE_URL}/api/datasets/${datasetId}/dedupe/candidates/generate`,
+    {
+      method: "POST",
+    }
+  );
+
+  return parseResponse(
+    response,
+    "Failed to generate candidate pairs."
+  );
+}
+
+export async function runSplinkMatching(datasetId) {
+  const response = await fetch(
+    `${API_BASE_URL}/api/datasets/${datasetId}/dedupe/match`,
+    {
+      method: "POST",
+    }
+  );
+
+  return parseResponse(
+    response,
+    "Failed to run Splink matching."
+  );
+}
+
+export async function getMatchDecisions(datasetId) {
+  const response = await fetch(
+    `${API_BASE_URL}/api/datasets/${datasetId}/dedupe/decisions`,
+    {
+      method: "POST",
+    }
+  );
+
+  return parseResponse(
+    response,
+    "Failed to classify match decisions."
+  );
+}
+
+/* ---------------- HUMAN REVIEW ---------------- */
+
+export async function getHumanReviewQueue(datasetId) {
+  const response = await fetch(
+    `${API_BASE_URL}/api/datasets/${datasetId}/dedupe/human-review`,
+    {
+      method: "GET",
+    }
+  );
+
+  return parseResponse(
+    response,
+    "Failed to load the Human Review queue."
+  );
+}
+
+export async function submitHumanReview(
+  datasetId,
+  recordAId,
+  recordBId,
+  decision
+) {
+  const response = await fetch(
+    `${API_BASE_URL}/api/datasets/${datasetId}/dedupe/human-review`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        record_a_id: recordAId,
+        record_b_id: recordBId,
+        decision,
+      }),
+    }
+  );
+
+  return parseResponse(
+    response,
+    "Failed to save the Human Review decision."
   );
 }

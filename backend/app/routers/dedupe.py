@@ -21,6 +21,10 @@ from app.models.schemas import (
     CandidatePairResponse,
     SplinkMatchResponse,
     SplinkMatchingResponse,
+    HumanReviewDecisionRequest,
+    HumanReviewDecisionResponse,
+    HumanReviewItem,
+    HumanReviewResponse,
 )
 from app.models.schemas import MatchDecisionItem, MatchDecisionResponse
 from app.services.blocking import (
@@ -44,6 +48,7 @@ from app.services.metadata import load_metadata
 from app.services.candidate_generation import generate_candidate_pairs
 from app.services.splink_matching import run_splink_matching
 from app.services.match_decision import classify_match_results
+from app.services.human_review import human_review_store
 
 
 router = APIRouter(
@@ -663,4 +668,156 @@ def get_match_decisions(dataset_id: str) -> MatchDecisionResponse:
         non_match_count=non_match_count,
         results=results,
         status="classified",
+    )
+
+@router.get(
+    "/{dataset_id}/dedupe/human-review",
+    response_model=HumanReviewResponse,
+)
+def get_human_review_queue(
+    dataset_id: str,
+) -> HumanReviewResponse:
+    session = _get_session(dataset_id)
+
+    learned_patterns = get_learned_dedupe_patterns(session)
+
+    try:
+        blocking_rules = generate_splink_blocking_rules(
+            learned_patterns
+        )
+
+        prediction_dataframe = run_splink_matching(
+            records=session.records,
+            blocking_rules=blocking_rules,
+            schema=session.schema,
+        )
+
+        required_columns = {
+            "unique_id_l",
+            "unique_id_r",
+            "match_probability",
+        }
+
+        missing_columns = required_columns - set(
+            prediction_dataframe.columns
+        )
+
+        if missing_columns:
+            raise ValueError(
+                "Splink prediction output is missing expected columns: "
+                + ", ".join(sorted(missing_columns))
+            )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    reviewed_decisions = {
+        (
+            decision.record_a_id,
+            decision.record_b_id,
+        )
+        for decision in human_review_store.get_all(dataset_id)
+    }
+
+    items: list[HumanReviewItem] = []
+
+    for _, row in prediction_dataframe.iterrows():
+        record_a_id = int(row["unique_id_l"])
+        record_b_id = int(row["unique_id_r"])
+        probability = float(row["match_probability"])
+
+        if record_a_id == record_b_id:
+            continue
+
+        normalized_pair = (
+            min(record_a_id, record_b_id),
+            max(record_a_id, record_b_id),
+        )
+
+        if normalized_pair in reviewed_decisions:
+            continue
+
+        if not 0.50 <= probability < 0.90:
+            continue
+
+        record_a = session.records.get(record_a_id)
+        record_b = session.records.get(record_b_id)
+
+        if record_a is None or record_b is None:
+            continue
+
+        items.append(
+            HumanReviewItem(
+                record_a=DedupeRecord(
+                    record_id=record_a_id,
+                    data=record_a,
+                ),
+                record_b=DedupeRecord(
+                    record_id=record_b_id,
+                    data=record_b,
+                ),
+                match_probability=probability,
+            )
+        )
+
+    items.sort(
+        key=lambda item: (
+            -item.match_probability,
+            item.record_a.record_id,
+            item.record_b.record_id,
+        )
+    )
+
+    return HumanReviewResponse(
+        dataset_id=dataset_id,
+        review_count=len(items),
+        items=items,
+        status="ready",
+    )
+
+
+@router.post(
+    "/{dataset_id}/dedupe/human-review",
+    response_model=HumanReviewDecisionResponse,
+)
+def submit_human_review(
+    dataset_id: str,
+    request: HumanReviewDecisionRequest,
+) -> HumanReviewDecisionResponse:
+    session = _get_session(dataset_id)
+
+    if request.record_a_id not in session.records:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Record {request.record_a_id} not found.",
+        )
+
+    if request.record_b_id not in session.records:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Record {request.record_b_id} not found.",
+        )
+
+    try:
+        decision = human_review_store.save(
+            dataset_id=dataset_id,
+            record_a_id=request.record_a_id,
+            record_b_id=request.record_b_id,
+            decision=request.decision,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return HumanReviewDecisionResponse(
+        dataset_id=dataset_id,
+        record_a_id=decision.record_a_id,
+        record_b_id=decision.record_b_id,
+        decision=decision.decision,
+        status="saved",
     )
