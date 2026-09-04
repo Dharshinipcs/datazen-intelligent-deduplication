@@ -231,3 +231,115 @@ class SplinkBlockingStrategyResponse(BaseModel):
     dataset_id: str
     source: str
     rules: list[SplinkBlockingRuleResponse]
+
+class CandidatePairResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_a_id: int
+    record_b_id: int
+
+
+class CandidateGenerationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    candidate_pair_count: int
+    blocking_rule_count: int
+    candidates: list[CandidatePairResponse]
+    status: str
+
+class SplinkMatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_a_id: int
+    record_b_id: int
+    match_probability: float
+
+
+class SplinkMatchingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    match_pair_count: int
+    blocking_rule_count: int
+    matches: list[SplinkMatchResponse]
+    status: str
+
+class MatchDecisionItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_a_id: int
+    record_b_id: int
+    match_probability: float = Field(ge=0.0, le=1.0)
+    decision: str
+
+
+class MatchDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    match_count: int
+    possible_match_count: int
+    non_match_count: int
+    results: list[MatchDecisionItem]
+    status: str
+
+class HumanReviewItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_a: DedupeRecord
+    record_b: DedupeRecord
+    match_probability: float = Field(ge=0.0, le=1.0)
+
+
+class HumanReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    review_count: int
+    items: list[HumanReviewItem]
+    status: str
+
+
+class HumanReviewDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_a_id: int
+    record_b_id: int
+    decision: str
+
+
+class HumanReviewDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    record_a_id: int
+    record_b_id: int
+    decision: str
+    status: str
+
+# ---------------------------------------------------------------------------
+# ENTITY CLUSTERING API SCHEMAS
+# ---------------------------------------------------------------------------
+
+
+class EntityClusterResponse(BaseModel):
+    """A single deduplicated entity cluster."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cluster_id: int
+    record_ids: list[int]
+
+
+class EntityClusteringResponse(BaseModel):
+    """Result of grouping matched records into entity clusters."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    cluster_count: int
+    clustered_record_count: int
+    unclustered_record_count: int
+    clusters: list[EntityClusterResponse]
+    status: str

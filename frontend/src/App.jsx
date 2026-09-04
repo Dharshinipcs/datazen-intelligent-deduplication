@@ -2,13 +2,19 @@ import { useRef, useState } from "react";
 import "./App.css";
 
 import {
+  buildEntityClusters,
   detectSchema,
   generateBlockingStrategy,
+  generateCandidatePairs,
+  getHumanReviewQueue,
+  getMatchDecisions,
   getUncertainDedupePair,
   labelDedupePair,
   prepareDedupe,
   profileDataset,
+  runSplinkMatching,
   standardizeDataset,
+  submitHumanReview,
   trainDedupe,
   uploadDataset,
 } from "./services/api";
@@ -51,9 +57,51 @@ function App() {
 
   const [dedupeMessage, setDedupeMessage] = useState("");
 
+  /* ---------------- Matching pipeline state ---------------- */
+
+  const [generatingCandidates, setGeneratingCandidates] =
+    useState(false);
+  const [candidateResult, setCandidateResult] = useState(null);
+
+  const [matchingSplink, setMatchingSplink] = useState(false);
+  const [matchingResult, setMatchingResult] = useState(null);
+
+  const [classifyingMatches, setClassifyingMatches] =
+    useState(false);
+  const [decisionResult, setDecisionResult] = useState(null);
+
+  /* ---------------- Human Review state ---------------- */
+
+  const [loadingHumanReview, setLoadingHumanReview] =
+    useState(false);
+  const [submittingHumanReview, setSubmittingHumanReview] =
+    useState(false);
+
+  const [humanReviewResult, setHumanReviewResult] =
+    useState(null);
+  const [currentReviewItem, setCurrentReviewItem] =
+    useState(null);
+
+  const [reviewedMatchCount, setReviewedMatchCount] =
+    useState(0);
+  const [reviewedNonMatchCount, setReviewedNonMatchCount] =
+    useState(0);
+
+  const [humanReviewMessage, setHumanReviewMessage] =
+    useState("");
+
+  /* ---------------- Entity Clustering state ---------------- */
+
+  const [clusteringEntities, setClusteringEntities] =
+    useState(false);
+  const [clusteringResult, setClusteringResult] =
+    useState(null);
+  const [clusteringMessage, setClusteringMessage] =
+    useState("");
+
   const [error, setError] = useState("");
 
-  /* ---------------- Helpers ---------------- */
+  /* ---------------- Processing state ---------------- */
 
   const processing =
     uploading ||
@@ -64,7 +112,15 @@ function App() {
     fetchingPair ||
     labelingPair ||
     trainingDedupe ||
-    generatingBlocking;
+    generatingBlocking ||
+    generatingCandidates ||
+    matchingSplink ||
+    classifyingMatches ||
+    loadingHumanReview ||
+    submittingHumanReview ||
+    clusteringEntities;
+
+  /* ---------------- Helpers ---------------- */
 
   function resetDedupeState() {
     setPreparingDedupe(false);
@@ -72,6 +128,12 @@ function App() {
     setLabelingPair(false);
     setTrainingDedupe(false);
     setGeneratingBlocking(false);
+
+    setGeneratingCandidates(false);
+    setMatchingSplink(false);
+    setClassifyingMatches(false);
+    setLoadingHumanReview(false);
+    setSubmittingHumanReview(false);
 
     setDedupePrepared(false);
     setCurrentPair(null);
@@ -81,7 +143,23 @@ function App() {
 
     setTrainingResult(null);
     setBlockingResult(null);
+
+    setCandidateResult(null);
+    setMatchingResult(null);
+    setDecisionResult(null);
+
+    setHumanReviewResult(null);
+    setCurrentReviewItem(null);
+
+    setReviewedMatchCount(0);
+    setReviewedNonMatchCount(0);
+
     setDedupeMessage("");
+    setHumanReviewMessage("");
+
+    setClusteringEntities(false);
+    setClusteringResult(null);
+    setClusteringMessage("");
   }
 
   function handleFileChange(event) {
@@ -219,6 +297,15 @@ function App() {
       setTrainingResult(null);
       setBlockingResult(null);
 
+      setCandidateResult(null);
+      setMatchingResult(null);
+      setDecisionResult(null);
+      setHumanReviewResult(null);
+      setCurrentReviewItem(null);
+
+      setClusteringResult(null);
+      setClusteringMessage("");
+
       await loadNextPair(datasetId);
     } catch (err) {
       setError(
@@ -272,6 +359,95 @@ function App() {
     }
   }
 
+  /* ---------------- Post-training matching pipeline ---------------- */
+
+  async function runPostBlockingPipeline(datasetId) {
+    setError("");
+
+    let candidateData;
+    let matchingData;
+    let decisionData;
+    let reviewData;
+
+    /* -------- Candidate generation -------- */
+
+    setGeneratingCandidates(true);
+
+    try {
+      candidateData =
+        await generateCandidatePairs(datasetId);
+
+      setCandidateResult(candidateData);
+    } catch (err) {
+      setError(
+        err.message ||
+          "Candidate generation failed."
+      );
+      return;
+    } finally {
+      setGeneratingCandidates(false);
+    }
+
+    /* -------- Splink matching -------- */
+
+    setMatchingSplink(true);
+
+    try {
+      matchingData =
+        await runSplinkMatching(datasetId);
+
+      setMatchingResult(matchingData);
+    } catch (err) {
+      setError(
+        err.message ||
+          "Splink matching failed."
+      );
+      return;
+    } finally {
+      setMatchingSplink(false);
+    }
+
+    /* -------- Match decisions -------- */
+
+    setClassifyingMatches(true);
+
+    try {
+      decisionData =
+        await getMatchDecisions(datasetId);
+
+      setDecisionResult(decisionData);
+    } catch (err) {
+      setError(
+        err.message ||
+          "Match decision classification failed."
+      );
+      return;
+    } finally {
+      setClassifyingMatches(false);
+    }
+
+    /* -------- Human Review queue -------- */
+
+    setLoadingHumanReview(true);
+
+    try {
+      reviewData =
+        await getHumanReviewQueue(datasetId);
+
+      setHumanReviewResult(reviewData);
+      setCurrentReviewItem(
+        reviewData.items?.[0] || null
+      );
+    } catch (err) {
+      setError(
+        err.message ||
+          "Failed to load the Human Review queue."
+      );
+    } finally {
+      setLoadingHumanReview(false);
+    }
+  }
+
   async function handleTrainDedupe() {
     if (
       !uploadResult?.dataset_id ||
@@ -302,6 +478,10 @@ function App() {
           );
 
         setBlockingResult(blockingData);
+
+        await runPostBlockingPipeline(
+          datasetId
+        );
       } catch (blockingError) {
         setError(
           blockingError.message ||
@@ -320,14 +500,144 @@ function App() {
     }
   }
 
+  /* ---------------- Human Review workflow ---------------- */
+
+  async function handleHumanReview(decision) {
+    if (
+      !uploadResult?.dataset_id ||
+      !currentReviewItem ||
+      submittingHumanReview
+    ) {
+      return;
+    }
+
+    const datasetId = uploadResult.dataset_id;
+    const item = currentReviewItem;
+
+    setSubmittingHumanReview(true);
+    setError("");
+    setHumanReviewMessage("");
+
+    try {
+      await submitHumanReview(
+        datasetId,
+        item.record_a.record_id,
+        item.record_b.record_id,
+        decision
+      );
+
+      if (decision === "match") {
+        setReviewedMatchCount(
+          (count) => count + 1
+        );
+      } else {
+        setReviewedNonMatchCount(
+          (count) => count + 1
+        );
+      }
+
+      setHumanReviewResult((previous) => {
+        if (!previous) {
+          return previous;
+        }
+
+        const remainingItems =
+          previous.items.filter(
+            (reviewItem) =>
+              !(
+                reviewItem.record_a.record_id ===
+                  item.record_a.record_id &&
+                reviewItem.record_b.record_id ===
+                  item.record_b.record_id
+              )
+          );
+
+        return {
+          ...previous,
+          items: remainingItems,
+          review_count: remainingItems.length,
+        };
+      });
+
+      setCurrentReviewItem(null);
+
+      setHumanReviewMessage(
+        decision === "match"
+          ? "Review saved as Match."
+          : "Review saved as Non-match."
+      );
+
+      setHumanReviewResult((previous) => {
+        if (!previous) {
+          return previous;
+        }
+
+        const nextItem =
+          previous.items?.[0] || null;
+
+        setCurrentReviewItem(nextItem);
+
+        return previous;
+      });
+    } catch (err) {
+      setError(
+        err.message ||
+          "Failed to save the Human Review decision."
+      );
+    } finally {
+      setSubmittingHumanReview(false);
+    }
+  }
+
+  /* ---------------- Entity Clustering workflow ---------------- */
+
+  async function handleEntityClustering() {
+    if (
+      !uploadResult?.dataset_id ||
+      clusteringEntities ||
+      processing
+    ) {
+      return;
+    }
+
+    const datasetId = uploadResult.dataset_id;
+
+    setClusteringEntities(true);
+    setError("");
+    setClusteringMessage("");
+    setClusteringResult(null);
+
+    try {
+      const result =
+        await buildEntityClusters(datasetId);
+
+      setClusteringResult(result);
+
+      setClusteringMessage(
+        "Entity clustering completed successfully."
+      );
+    } catch (err) {
+      setError(
+        err.message ||
+          "Failed to build entity clusters."
+      );
+    } finally {
+      setClusteringEntities(false);
+    }
+  }
+
   const canTrain =
     matchCount >= 3 && distinctCount >= 3;
 
   const hasEnoughLabelsForRecommendation =
     matchCount >= 8 && distinctCount >= 8;
 
-  const dedupeReady =
-    dedupePrepared && !trainingResult;
+  const reviewCount =
+    humanReviewResult?.review_count ?? 0;
+
+  const humanReviewComplete =
+    Boolean(humanReviewResult) &&
+    reviewCount === 0;
 
   return (
     <div className="app">
@@ -464,10 +774,77 @@ function App() {
 
             <div className="pipeline-line" />
 
-            <div className="pipeline-step">
+            <div
+              className={`pipeline-step ${
+                candidateResult ||
+                generatingCandidates
+                  ? "active"
+                  : ""
+              }`}
+            >
               <span>08</span>
+              <strong>Candidates</strong>
+              <small>Generate pairs</small>
+            </div>
+
+            <div className="pipeline-line" />
+
+            <div
+              className={`pipeline-step ${
+                matchingResult ||
+                matchingSplink
+                  ? "active"
+                  : ""
+              }`}
+            >
+              <span>09</span>
               <strong>Match</strong>
-              <small>Find duplicates</small>
+              <small>Run Splink</small>
+            </div>
+
+            <div className="pipeline-line" />
+
+            <div
+              className={`pipeline-step ${
+                decisionResult ||
+                classifyingMatches
+                  ? "active"
+                  : ""
+              }`}
+            >
+              <span>10</span>
+              <strong>Decide</strong>
+              <small>Classify pairs</small>
+            </div>
+
+            <div className="pipeline-line" />
+
+            <div
+              className={`pipeline-step ${
+                humanReviewResult ||
+                loadingHumanReview
+                  ? "active"
+                  : ""
+              }`}
+            >
+              <span>11</span>
+              <strong>Review</strong>
+              <small>Human validation</small>
+            </div>
+
+            <div className="pipeline-line" />
+
+            <div
+              className={`pipeline-step ${
+                clusteringResult ||
+                clusteringEntities
+                  ? "active"
+                  : ""
+              }`}
+            >
+              <span>12</span>
+              <strong>Cluster</strong>
+              <small>Group entities</small>
             </div>
           </div>
         </section>
@@ -1249,6 +1626,8 @@ function App() {
                 </>
               )}
 
+            {/* ---------------- TRAINED + MATCHING ---------------- */}
+
             {trainingResult && (
               <div className="trained-section">
                 <div className="trained-banner">
@@ -1268,6 +1647,8 @@ function App() {
                     </span>
                   </div>
                 </div>
+
+                {/* -------- Learned patterns -------- */}
 
                 <div className="learned-patterns">
                   <div className="subsection-heading">
@@ -1331,6 +1712,8 @@ function App() {
                     </div>
                   )}
                 </div>
+
+                {/* -------- Blocking -------- */}
 
                 {generatingBlocking && (
                   <div className="message processing">
@@ -1416,22 +1799,685 @@ function App() {
                   </div>
                 )}
 
-                {blockingResult && (
-                  <div className="ready-banner">
-                    <div className="ready-icon">
-                      →
+                {/* -------- Candidate generation -------- */}
+
+                {generatingCandidates && (
+                  <div className="message processing">
+                    <strong>
+                      Generating candidate pairs...
+                    </strong>
+
+                    <span>
+                      Applying the learned blocking
+                      rules to reduce the comparison
+                      search space.
+                    </span>
+                  </div>
+                )}
+
+                {candidateResult && (
+                  <div className="pipeline-result-card">
+                    <div className="subsection-heading">
+                      <div>
+                        <p className="eyebrow">
+                          CANDIDATE GENERATION
+                        </p>
+
+                        <h4>
+                          Candidate Pairs Generated
+                        </h4>
+                      </div>
+
+                      <div className="schema-count">
+                        {candidateResult.candidate_pair_count.toLocaleString()}{" "}
+                        Pairs
+                      </div>
                     </div>
 
-                    <div>
-                      <strong>
-                        Ready for candidate generation
-                      </strong>
+                    <div className="result-stat-grid">
+                      <div className="result-stat">
+                        <span>Candidate pairs</span>
+                        <strong>
+                          {candidateResult.candidate_pair_count.toLocaleString()}
+                        </strong>
+                      </div>
 
-                      <span>
-                        The learned blocking strategy is
-                        ready for the next pipeline stage:
-                        candidate pair generation.
-                      </span>
+                      <div className="result-stat">
+                        <span>Blocking rules</span>
+                        <strong>
+                          {candidateResult.blocking_rule_count}
+                        </strong>
+                      </div>
+
+                      <div className="result-stat">
+                        <span>Status</span>
+                        <strong>
+                          {candidateResult.status}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* -------- Splink matching -------- */}
+
+                {matchingSplink && (
+                  <div className="message processing">
+                    <strong>
+                      Running Splink matching...
+                    </strong>
+
+                    <span>
+                      Comparing candidate records and
+                      estimating match probabilities.
+                    </span>
+                  </div>
+                )}
+
+                {matchingResult && (
+                  <div className="pipeline-result-card">
+                    <div className="subsection-heading">
+                      <div>
+                        <p className="eyebrow">
+                          SPLINK MATCHING
+                        </p>
+
+                        <h4>
+                          Probabilistic Matching Complete
+                        </h4>
+                      </div>
+
+                      <div className="schema-count">
+                        {matchingResult.match_pair_count.toLocaleString()}{" "}
+                        Matches
+                      </div>
+                    </div>
+
+                    <div className="result-stat-grid">
+                      <div className="result-stat">
+                        <span>Pairs evaluated</span>
+                        <strong>
+                          {matchingResult.match_pair_count.toLocaleString()}
+                        </strong>
+                      </div>
+
+                      <div className="result-stat">
+                        <span>Blocking rules</span>
+                        <strong>
+                          {matchingResult.blocking_rule_count}
+                        </strong>
+                      </div>
+
+                      <div className="result-stat">
+                        <span>Status</span>
+                        <strong>
+                          {matchingResult.status}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* -------- Match decisions -------- */}
+
+                {classifyingMatches && (
+                  <div className="message processing">
+                    <strong>
+                      Classifying match probabilities...
+                    </strong>
+
+                    <span>
+                      Separating automatic matches,
+                      possible matches, and non-matches.
+                    </span>
+                  </div>
+                )}
+
+                {decisionResult && (
+                  <div className="pipeline-result-card">
+                    <div className="subsection-heading">
+                      <div>
+                        <p className="eyebrow">
+                          MATCH DECISIONS
+                        </p>
+
+                        <h4>
+                          Resolution Summary
+                        </h4>
+                      </div>
+
+                      <div className="schema-count">
+                        Classified
+                      </div>
+                    </div>
+
+                    <div className="decision-stat-grid">
+                      <div className="decision-stat match-stat">
+                        <span>Automatic matches</span>
+                        <strong>
+                          {decisionResult.match_count.toLocaleString()}
+                        </strong>
+                        <small>
+                          ≥ 90% probability
+                        </small>
+                      </div>
+
+                      <div className="decision-stat possible-stat">
+                        <span>Possible matches</span>
+                        <strong>
+                          {decisionResult.possible_match_count.toLocaleString()}
+                        </strong>
+                        <small>
+                          50% – &lt; 90%
+                        </small>
+                      </div>
+
+                      <div className="decision-stat distinct-stat">
+                        <span>Non-matches</span>
+                        <strong>
+                          {decisionResult.non_match_count.toLocaleString()}
+                        </strong>
+                        <small>
+                          &lt; 50% probability
+                        </small>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* -------- Human Review -------- */}
+
+                {loadingHumanReview && (
+                  <div className="message processing">
+                    <strong>
+                      Loading Human Review queue...
+                    </strong>
+
+                    <span>
+                      Preparing possible matches that
+                      require human validation.
+                    </span>
+                  </div>
+                )}
+
+                {humanReviewResult && (
+                  <div className="human-review-section">
+                    <div className="subsection-heading">
+                      <div>
+                        <p className="eyebrow">
+                          HUMAN REVIEW
+                        </p>
+
+                        <h4>
+                          Validate Possible Matches
+                        </h4>
+                      </div>
+
+                      <div className="schema-count">
+                        {reviewCount}{" "}
+                        {reviewCount === 1
+                          ? "Pair"
+                          : "Pairs"}{" "}
+                        Remaining
+                      </div>
+                    </div>
+
+                    <p className="schema-description">
+                      Pairs with intermediate match
+                      probabilities are reviewed manually
+                      before entity clustering and golden
+                      record creation.
+                    </p>
+
+                    <div className="review-progress">
+                      <div className="review-stat">
+                        <span>
+                          Possible matches
+                        </span>
+
+                        <strong>
+                          {reviewCount}
+                        </strong>
+                      </div>
+
+                      <div className="review-stat reviewed-match-stat">
+                        <span>
+                          Confirmed matches
+                        </span>
+
+                        <strong>
+                          {reviewedMatchCount}
+                        </strong>
+                      </div>
+
+                      <div className="review-stat reviewed-distinct-stat">
+                        <span>
+                          Rejected matches
+                        </span>
+
+                        <strong>
+                          {reviewedNonMatchCount}
+                        </strong>
+                      </div>
+                    </div>
+
+                    {currentReviewItem && (
+                      <div className="pair-card review-pair-card">
+                        <div className="pair-heading">
+                          <div>
+                            <p className="eyebrow">
+                              POSSIBLE MATCH
+                            </p>
+
+                            <h4>
+                              Do these records represent
+                              the same entity?
+                            </h4>
+                          </div>
+
+                          <div className="review-probability">
+                            <span>
+                              Match probability
+                            </span>
+
+                            <strong>
+                              {(
+                                currentReviewItem.match_probability *
+                                100
+                              ).toFixed(1)}
+                              %
+                            </strong>
+                          </div>
+                        </div>
+
+                        <div className="pair-comparison">
+                          <div className="record-card">
+                            <div className="record-header">
+                              <span>
+                                RECORD A
+                              </span>
+
+                              <strong>
+                                #
+                                {
+                                  currentReviewItem
+                                    .record_a
+                                    .record_id
+                                }
+                              </strong>
+                            </div>
+
+                            <div className="record-fields">
+                              {Object.entries(
+                                currentReviewItem
+                                  .record_a
+                                  .data
+                              ).map(
+                                ([field, value]) => (
+                                  <div
+                                    className="record-field"
+                                    key={`review-a-${field}`}
+                                  >
+                                    <span>
+                                      {field}
+                                    </span>
+
+                                    <strong>
+                                      {value === ""
+                                        ? "—"
+                                        : value}
+                                    </strong>
+                                  </div>
+                                )
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="versus">
+                            VS
+                          </div>
+
+                          <div className="record-card">
+                            <div className="record-header">
+                              <span>
+                                RECORD B
+                              </span>
+
+                              <strong>
+                                #
+                                {
+                                  currentReviewItem
+                                    .record_b
+                                    .record_id
+                                }
+                              </strong>
+                            </div>
+
+                            <div className="record-fields">
+                              {Object.entries(
+                                currentReviewItem
+                                  .record_b
+                                  .data
+                              ).map(
+                                ([field, value]) => (
+                                  <div
+                                    className="record-field"
+                                    key={`review-b-${field}`}
+                                  >
+                                    <span>
+                                      {field}
+                                    </span>
+
+                                    <strong>
+                                      {value === ""
+                                        ? "—"
+                                        : value}
+                                    </strong>
+                                  </div>
+                                )
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="label-actions">
+                          <button
+                            type="button"
+                            className="label-button distinct-button"
+                            onClick={() =>
+                              handleHumanReview(
+                                "non_match"
+                              )
+                            }
+                            disabled={
+                              submittingHumanReview
+                            }
+                          >
+                            <span>×</span>
+                            Non-Match
+                          </button>
+
+                          <button
+                            type="button"
+                            className="label-button match-button"
+                            onClick={() =>
+                              handleHumanReview(
+                                "match"
+                              )
+                            }
+                            disabled={
+                              submittingHumanReview
+                            }
+                          >
+                            <span>✓</span>
+                            Confirm Match
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {submittingHumanReview && (
+                      <div className="message processing">
+                        <strong>
+                          Saving review decision...
+                        </strong>
+
+                        <span>
+                          Recording the human validation
+                          before moving to the next pair.
+                        </span>
+                      </div>
+                    )}
+
+                    {humanReviewMessage && (
+                      <div className="message success">
+                        <strong>
+                          Review decision saved.
+                        </strong>
+
+                        <span>
+                          {humanReviewMessage}
+                        </span>
+                      </div>
+                    )}
+
+                    {humanReviewComplete && (
+                      <div className="ready-banner">
+                        <div className="ready-icon">
+                          ✓
+                        </div>
+
+                        <div>
+                          <strong>
+                            Human Review complete
+                          </strong>
+
+                          <span>
+                            All possible matches have been
+                            manually resolved. The pipeline
+                            is ready for entity clustering
+                            and golden record creation.
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* -------- Entity Clustering -------- */}
+
+                {humanReviewComplete &&
+                  !clusteringResult && (
+                    <div className="entity-clustering-start">
+                      <div className="entity-clustering-start-icon">
+                        12
+                      </div>
+
+                      <div className="entity-clustering-start-content">
+                        <strong>
+                          Build Entity Clusters
+                        </strong>
+
+                        <span>
+                          Group confirmed duplicate records
+                          into unified entities using
+                          automatic matches and
+                          human-reviewed decisions.
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        className="upload-button"
+                        onClick={
+                          handleEntityClustering
+                        }
+                        disabled={processing}
+                      >
+                        {clusteringEntities
+                          ? "Clustering..."
+                          : "Build Entity Clusters"}
+                      </button>
+                    </div>
+                  )}
+
+                {clusteringEntities && (
+                  <div className="message processing">
+                    <strong>
+                      Building entity clusters...
+                    </strong>
+
+                    <span>
+                      Grouping confirmed duplicate records
+                      using transitive entity relationships.
+                    </span>
+                  </div>
+                )}
+
+                {clusteringResult && (
+                  <div className="entity-clustering-section">
+                    <div className="subsection-heading">
+                      <div>
+                        <p className="eyebrow">
+                          ENTITY CLUSTERING COMPLETE
+                        </p>
+
+                        <h4>
+                          Resolved Entity Groups
+                        </h4>
+                      </div>
+
+                      <div className="schema-count">
+                        {clusteringResult.cluster_count}{" "}
+                        {clusteringResult.cluster_count === 1
+                          ? "Entity"
+                          : "Entities"}
+                      </div>
+                    </div>
+
+                    <p className="schema-description">
+                      Confirmed duplicate records have been
+                      grouped into unified entity clusters.
+                      Records connected through matching
+                      relationships are resolved into the
+                      same entity.
+                    </p>
+
+                    <div className="cluster-stat-grid">
+                      <div className="cluster-stat">
+                        <span>
+                          Entity clusters
+                        </span>
+
+                        <strong>
+                          {clusteringResult.cluster_count.toLocaleString()}
+                        </strong>
+
+                        <small>
+                          Resolved duplicate entities
+                        </small>
+                      </div>
+
+                      <div className="cluster-stat">
+                        <span>
+                          Clustered records
+                        </span>
+
+                        <strong>
+                          {clusteringResult.clustered_record_count.toLocaleString()}
+                        </strong>
+
+                        <small>
+                          Records assigned to entities
+                        </small>
+                      </div>
+
+                      <div className="cluster-stat">
+                        <span>
+                          Unclustered records
+                        </span>
+
+                        <strong>
+                          {clusteringResult.unclustered_record_count.toLocaleString()}
+                        </strong>
+
+                        <small>
+                          No confirmed duplicate relationship
+                        </small>
+                      </div>
+                    </div>
+
+                    <div className="cluster-list">
+                      {clusteringResult.clusters.map(
+                        (cluster) => (
+                          <div
+                            className="cluster-card"
+                            key={cluster.cluster_id}
+                          >
+                            <div className="cluster-card-header">
+                              <div className="cluster-identity">
+                                <div className="cluster-number">
+                                  {String(
+                                    cluster.cluster_id
+                                  ).padStart(2, "0")}
+                                </div>
+
+                                <div>
+                                  <strong>
+                                    Entity Cluster{" "}
+                                    {cluster.cluster_id}
+                                  </strong>
+
+                                  <span>
+                                    {
+                                      cluster.record_ids
+                                        .length
+                                    }{" "}
+                                    records
+                                  </span>
+                                </div>
+                              </div>
+
+                              <span className="cluster-badge">
+                                Duplicate entity
+                              </span>
+                            </div>
+
+                            <div className="cluster-records">
+                              {cluster.record_ids.map(
+                                (recordId) => (
+                                  <span
+                                    className="cluster-record"
+                                    key={recordId}
+                                  >
+                                    Record #{recordId}
+                                  </span>
+                                )
+                              )}
+                            </div>
+                          </div>
+                        )
+                      )}
+                    </div>
+
+                    {clusteringMessage && (
+                      <div className="message success">
+                        <strong>
+                          Entity clustering completed.
+                        </strong>
+
+                        <span>
+                          {
+                            clusteringResult.cluster_count
+                          }{" "}
+                          duplicate entities were resolved
+                          from{" "}
+                          {
+                            clusteringResult.clustered_record_count
+                          }{" "}
+                          records.
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="clustering-complete-banner">
+                      <div className="clustering-complete-icon">
+                        ✓
+                      </div>
+
+                      <div>
+                        <strong>
+                          Entity Resolution Complete
+                        </strong>
+
+                        <span>
+                          Duplicate records have been
+                          grouped into entity-level
+                          clusters. The pipeline is now
+                          ready for golden record creation
+                          and survivorship.
+                        </span>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1445,3 +2491,4 @@ function App() {
 }
 
 export default App;
+
